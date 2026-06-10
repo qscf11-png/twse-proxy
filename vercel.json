@@ -1,4 +1,9 @@
 {
+    "functions": {
+        "api/*.js": {
+            "maxDuration": 60
+        }
+    },
     "rewrites": [
         {
             "source": "/api/(.*)",
@@ -19,7 +24,7 @@
                 },
                 {
                     "key": "Access-Control-Allow-Headers",
-                    "value": "Content-Type, api-key"
+                    "value": "Content-Type, api-key, Authorization"
                 }
             ]
         }
