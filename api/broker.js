@@ -31,7 +31,8 @@ export default async function handler(req, res) {
 
         // 資料列：日期 | 買進(張) | 賣出(張) | 買賣總額(張) | 買賣超(張)
         const rows = [];
-        const re = /<td[^>]*>(\d{4}\/\d{2}\/\d{2})<\/td>\s*<td[^>]*>([\d,]+)<\/td>\s*<td[^>]*>([\d,]+)<\/td>\s*<td[^>]*>([\d,]+)<\/td>\s*<td[^>]*>(-?[\d,]+)<\/td>/g;
+        // 注意：來源頁資料列使用大寫 <TD>，需 i 旗標
+        const re = /<td[^>]*>(\d{4}\/\d{2}\/\d{2})<\/td>\s*<td[^>]*>([\d,]+)<\/td>\s*<td[^>]*>([\d,]+)<\/td>\s*<td[^>]*>([\d,]+)<\/td>\s*<td[^>]*>(-?[\d,]+)<\/td>/gi;
         let m;
         while ((m = re.exec(html)) !== null && rows.length < 15) {
             rows.push({
