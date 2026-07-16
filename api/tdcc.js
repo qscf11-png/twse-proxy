@@ -91,7 +91,7 @@ export default async function handler(req, res) {
     if (!/^[0-9A-Za-z]{4,6}$/.test(stockNo)) {
         return res.status(400).json({ error: 'invalid stockNo' });
     }
-    const weeks = Math.min(Math.max(parseInt(req.query.weeks, 10) || 5, 1), 6);
+    const weeks = Math.min(Math.max(parseInt(req.query.weeks, 10) || 5, 1), 12);
 
     try {
         // 先拿一次表單取得可用週次清單，再平行查各週（各自獨立 session）
