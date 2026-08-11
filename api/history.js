@@ -16,14 +16,22 @@ const fetchYahoo = async (symbol, suffix, range) => {
     const r = data?.chart?.result?.[0];
     if (!r) return null;
     const ts = r.timestamp || [];
-    const closes = r.indicators?.quote?.[0]?.close || [];
+    const q = r.indicators?.quote?.[0] || {};
+    const closes = q.close || [];
+    const highs = q.high || [];
+    const lows = q.low || [];
+    const vols = q.volume || [];
     const history = [];
     for (let i = 0; i < ts.length; i++) {
         const close = closes[i];
         if (close == null || close <= 0) continue;
+        // high/low/volume 供型態判定與大量區間低點計算（缺值以收盤價/0 補）
         history.push({
             date: new Date(ts[i] * 1000).toISOString().slice(0, 10),
             close,
+            high: highs[i] > 0 ? highs[i] : close,
+            low: lows[i] > 0 ? lows[i] : close,
+            volume: vols[i] > 0 ? vols[i] : 0,
         });
     }
     return history.length > 0 ? history : null;
