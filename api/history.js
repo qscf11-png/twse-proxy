@@ -9,7 +9,7 @@ const HEADERS = {
 };
 
 const fetchYahoo = async (symbol, suffix, range) => {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}${suffix}?interval=1d&range=${range}`;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}${suffix}?interval=1d&range=${range}`;
     const resp = await fetch(url, { headers: HEADERS });
     if (!resp.ok) return null;
     const data = await resp.json();
