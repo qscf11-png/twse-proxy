@@ -50,7 +50,43 @@ export default async function handler(req, res) {
     if (!symbol) {
         return res.status(400).json({ error: 'Missing symbol parameter' });
     }
-    // 指數（^TWII 加權、^TWOII 櫃買）不加 .TW/.TWO 後綴，直接查詢
+    // 櫃買指數：Yahoo 的 ^TWOII 資料會停滯（實測停在 7/17 且數值失真），
+    // 改以 TPEx 官方「日成交量值指數」逐月組出完整歷史。
+    if (symbol === '^TWOII' || symbol === 'TWOII') {
+        try {
+            const months = { '1mo': 2, '3mo': 4, '6mo': 7, '1y': 13, '2y': 25, '5y': 61 }[req.query.range] || 7;
+            const now = new Date();
+            const seen = new Map();
+            for (let i = months - 1; i >= 0; i--) {
+                const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                const q = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/01`;
+                const r = await fetch(
+                    `https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingIndex?date=${encodeURIComponent(q)}&response=json`,
+                    { headers: HEADERS });
+                if (!r.ok) continue;
+                const j = await r.json();
+                for (const row of (j?.tables?.[0]?.data || [])) {
+                    // 欄位：[民國日期, 成交股數, 成交金額, 成交筆數, 收盤指數, 漲跌]
+                    const roc = String(row[0] || '').trim();
+                    const m = roc.match(/^(\d{2,3})\/(\d{2})\/(\d{2})$/);
+                    const close = parseFloat(String(row[4]).replace(/,/g, ''));
+                    if (!m || !(close > 0)) continue;
+                    const date = `${parseInt(m[1], 10) + 1911}-${m[2]}-${m[3]}`;
+                    const volume = parseInt(String(row[1]).replace(/,/g, ''), 10) || 0;
+                    // 指數無 OHLC，以收盤價填充 high/low（型態判定改以收盤為準）
+                    seen.set(date, { date, close, high: close, low: close, volume });
+                }
+            }
+            const history = [...seen.values()].sort((a, b) => a.date.localeCompare(b.date));
+            if (history.length === 0) return res.status(200).json({ symbol, history: [] });
+            res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=7200');
+            return res.status(200).json({ symbol, history });
+        } catch (err) {
+            return res.status(502).json({ error: err.message });
+        }
+    }
+
+    // 指數（^TWII 加權）不加 .TW/.TWO 後綴，直接查詢
     if (symbol.startsWith('^')) {
         try {
             const range = ['1mo', '3mo', '6mo', '1y', '2y', '5y'].includes(req.query.range) ? req.query.range : '6mo';
