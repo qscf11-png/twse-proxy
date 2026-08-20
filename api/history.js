@@ -50,6 +50,18 @@ export default async function handler(req, res) {
     if (!symbol) {
         return res.status(400).json({ error: 'Missing symbol parameter' });
     }
+    // 指數（^TWII 加權、^TWOII 櫃買）不加 .TW/.TWO 後綴，直接查詢
+    if (symbol.startsWith('^')) {
+        try {
+            const range = ['1mo', '3mo', '6mo', '1y', '2y', '5y'].includes(req.query.range) ? req.query.range : '6mo';
+            const history = await fetchYahoo(symbol, '', range);
+            if (!history) return res.status(200).json({ symbol, history: [] });
+            res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=7200');
+            return res.status(200).json({ symbol, history });
+        } catch (err) {
+            return res.status(502).json({ error: err.message });
+        }
+    }
     // 限制 range 白名單，避免濫用
     const allowed = ['1mo', '3mo', '6mo', '1y', '2y', '5y'];
     const range = allowed.includes(req.query.range) ? req.query.range : '1y';
