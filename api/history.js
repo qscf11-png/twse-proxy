@@ -37,6 +37,82 @@ const fetchYahoo = async (symbol, suffix, range) => {
     return history.length > 0 ? history : null;
 };
 
+// 民國日期（115/09/01）→ 西元（2026-09-01）
+const rocToIso = (s) => {
+    const m = String(s || '').trim().match(/^(\d{2,3})\/(\d{2})\/(\d{2})$/);
+    return m ? `${parseInt(m[1], 10) + 1911}-${m[2]}-${m[3]}` : null;
+};
+const num = (s) => {
+    const n = parseFloat(String(s).replace(/,/g, ''));
+    return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * 以官方日成交資訊補齊 Yahoo 的缺漏日
+ * 實測 Yahoo 會漏日（0050 缺 2026-09-01，該日大漲 +2.2，官方收 108.45），
+ * 導致每日損益與均線失準。官方資料為權威，重疊日一律以官方為準。
+ * 為控制延遲，只補最近 months 個月。
+ */
+const fetchOfficialRecent = async (symbol, months = 2) => {
+    const out = {};
+    const now = new Date();
+    const jobs = [];
+    for (let i = 0; i < months; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const y = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        jobs.push({ ymd: `${y}${mm}01`, slash: `${y}/${mm}/01` });
+    }
+
+    await Promise.all(jobs.map(async ({ ymd, slash }) => {
+        // 上市（TWSE）：欄位 [日期,成交股數,成交金額,開,高,低,收,漲跌,筆數]
+        try {
+            const r = await fetch(
+                `https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date=${ymd}&stockNo=${encodeURIComponent(symbol)}&response=json`,
+                { headers: HEADERS });
+            if (r.ok) {
+                const j = await r.json();
+                if (j?.stat === 'OK' && Array.isArray(j.data) && j.data.length) {
+                    for (const row of j.data) {
+                        const date = rocToIso(row[0]);
+                        const close = num(row[6]);
+                        if (!date || !(close > 0)) continue;
+                        out[date] = {
+                            date, close,
+                            high: num(row[4]) > 0 ? num(row[4]) : close,
+                            low: num(row[5]) > 0 ? num(row[5]) : close,
+                            volume: num(row[1]) || 0,
+                        };
+                    }
+                    return;   // 上市已取得，無需再試上櫃
+                }
+            }
+        } catch { /* 換上櫃 */ }
+
+        // 上櫃（TPEx）：欄位 [日期,成交張數,成交仟元,開,高,低,收,漲跌,筆數]
+        try {
+            const r = await fetch(
+                `https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock?code=${encodeURIComponent(symbol)}&date=${encodeURIComponent(slash)}&response=json`,
+                { headers: HEADERS });
+            if (!r.ok) return;
+            const j = await r.json();
+            for (const row of (j?.tables?.[0]?.data || [])) {
+                const date = rocToIso(row[0]);
+                const close = num(row[6]);
+                if (!date || !(close > 0)) continue;
+                out[date] = {
+                    date, close,
+                    high: num(row[4]) > 0 ? num(row[4]) : close,
+                    low: num(row[5]) > 0 ? num(row[5]) : close,
+                    volume: (num(row[1]) || 0) * 1000,   // 張 → 股，與 Yahoo 單位一致
+                };
+            }
+        } catch { /* 忽略 */ }
+    }));
+
+    return out;
+};
+
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -105,7 +181,17 @@ export default async function handler(req, res) {
     try {
         let history = await fetchYahoo(symbol, '.TW', range);
         if (!history) history = await fetchYahoo(symbol, '.TWO', range);
-        if (!history) {
+
+        // 以官方日成交補齊／校正近兩個月（Yahoo 實測會漏日，見 fetchOfficialRecent 註解）
+        const official = await fetchOfficialRecent(symbol, 2);
+        if (Object.keys(official).length > 0) {
+            const byDate = {};
+            for (const h of (history || [])) byDate[h.date] = h;
+            for (const [d, v] of Object.entries(official)) byDate[d] = v;   // 官方為準
+            history = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+        }
+
+        if (!history || history.length === 0) {
             return res.status(200).json({ symbol, history: [] });
         }
         // 歷史日線每日僅更新一次，快取 1 小時
