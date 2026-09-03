@@ -106,6 +106,21 @@ const fetchOfficialRecent = async (symbol, months = 1) => {
     return out;
 };
 
+/**
+ * 交易日曆：以 Yahoo 的加權指數（^TWII）近一個月序列為準。
+ * 用途是判斷個股序列是否真的缺日——只有缺日時才去打官方 API。
+ * 若每檔都無條件補官方，36 檔併發時 TWSE/TPEx 會對同一出口 IP 限流，
+ * 實測單檔延遲從 0.8s 飆到 10s 以上。
+ */
+const fetchCalendar = async () => {
+    try {
+        const h = await fetchYahoo('^TWII', '', '1mo');
+        return h ? h.map((x) => x.date) : [];
+    } catch {
+        return [];
+    }
+};
+
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -172,16 +187,29 @@ export default async function handler(req, res) {
     const range = allowed.includes(req.query.range) ? req.query.range : '1y';
 
     try {
-        let history = await fetchYahoo(symbol, '.TW', range);
-        if (!history) history = await fetchYahoo(symbol, '.TWO', range);
+        // 個股序列與交易日曆同時抓（日曆用於判斷是否缺日，不增加關鍵路徑延遲）
+        const [histRaw, calendar] = await Promise.all([
+            (async () => (await fetchYahoo(symbol, '.TW', range)) || (await fetchYahoo(symbol, '.TWO', range)))(),
+            fetchCalendar(),
+        ]);
+        let history = histRaw;
 
-        // 以官方日成交補齊／校正近兩個月（Yahoo 實測會漏日，見 fetchOfficialRecent 註解）
-        const official = await fetchOfficialRecent(symbol, 1);
-        if (Object.keys(official).length > 0) {
-            const byDate = {};
-            for (const h of (history || [])) byDate[h.date] = h;
-            for (const [d, v] of Object.entries(official)) byDate[d] = v;   // 官方為準
-            history = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+        // 僅在近 20 個交易日確實有缺漏時，才以官方日成交補齊
+        // （Yahoo 實測會漏日，如 0050 缺 2026-09-01，見 fetchOfficialRecent 註解）
+        const have = new Set((history || []).map((h) => h.date));
+        const firstDate = history?.[0]?.date;
+        const gaps = calendar
+            .slice(-20)
+            .filter((d) => (!firstDate || d >= firstDate) && !have.has(d));
+
+        if (gaps.length > 0) {
+            const official = await fetchOfficialRecent(symbol, 1);
+            if (Object.keys(official).length > 0) {
+                const byDate = {};
+                for (const h of (history || [])) byDate[h.date] = h;
+                for (const [d, v] of Object.entries(official)) byDate[d] = v;   // 官方為準
+                history = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+            }
         }
 
         if (!history || history.length === 0) {
