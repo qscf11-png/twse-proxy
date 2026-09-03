@@ -53,7 +53,7 @@ const num = (s) => {
  * 導致每日損益與均線失準。官方資料為權威，重疊日一律以官方為準。
  * 為控制延遲，只補最近 months 個月。
  */
-const fetchOfficialRecent = async (symbol, months = 2) => {
+const fetchOfficialRecent = async (symbol, months = 1) => {
     const out = {};
     const now = new Date();
     const jobs = [];
@@ -64,39 +64,20 @@ const fetchOfficialRecent = async (symbol, months = 2) => {
         jobs.push({ ymd: `${y}${mm}01`, slash: `${y}/${mm}/01` });
     }
 
+    // 上市與上櫃同時查（不串行）：一檔只屬於其中一個市場，另一邊回空即可，
+    // 如此每月僅耗一次 round-trip，避免上櫃股要等 TWSE 失敗後才查 TPEx。
     await Promise.all(jobs.map(async ({ ymd, slash }) => {
-        // 上市（TWSE）：欄位 [日期,成交股數,成交金額,開,高,低,收,漲跌,筆數]
-        try {
-            const r = await fetch(
-                `https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date=${ymd}&stockNo=${encodeURIComponent(symbol)}&response=json`,
-                { headers: HEADERS });
-            if (r.ok) {
-                const j = await r.json();
-                if (j?.stat === 'OK' && Array.isArray(j.data) && j.data.length) {
-                    for (const row of j.data) {
-                        const date = rocToIso(row[0]);
-                        const close = num(row[6]);
-                        if (!date || !(close > 0)) continue;
-                        out[date] = {
-                            date, close,
-                            high: num(row[4]) > 0 ? num(row[4]) : close,
-                            low: num(row[5]) > 0 ? num(row[5]) : close,
-                            volume: num(row[1]) || 0,
-                        };
-                    }
-                    return;   // 上市已取得，無需再試上櫃
-                }
-            }
-        } catch { /* 換上櫃 */ }
+        const twse = fetch(
+            `https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date=${ymd}&stockNo=${encodeURIComponent(symbol)}&response=json`,
+            { headers: HEADERS }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+        const tpex = fetch(
+            `https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock?code=${encodeURIComponent(symbol)}&date=${encodeURIComponent(slash)}&response=json`,
+            { headers: HEADERS }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+        const [jT, jP] = await Promise.all([twse, tpex]);
 
-        // 上櫃（TPEx）：欄位 [日期,成交張數,成交仟元,開,高,低,收,漲跌,筆數]
-        try {
-            const r = await fetch(
-                `https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock?code=${encodeURIComponent(symbol)}&date=${encodeURIComponent(slash)}&response=json`,
-                { headers: HEADERS });
-            if (!r.ok) return;
-            const j = await r.json();
-            for (const row of (j?.tables?.[0]?.data || [])) {
+        // 上市（TWSE）：欄位 [日期,成交股數,成交金額,開,高,低,收,漲跌,筆數]
+        if (jT?.stat === 'OK' && Array.isArray(jT.data)) {
+            for (const row of jT.data) {
                 const date = rocToIso(row[0]);
                 const close = num(row[6]);
                 if (!date || !(close > 0)) continue;
@@ -104,10 +85,22 @@ const fetchOfficialRecent = async (symbol, months = 2) => {
                     date, close,
                     high: num(row[4]) > 0 ? num(row[4]) : close,
                     low: num(row[5]) > 0 ? num(row[5]) : close,
-                    volume: (num(row[1]) || 0) * 1000,   // 張 → 股，與 Yahoo 單位一致
+                    volume: num(row[1]) || 0,
                 };
             }
-        } catch { /* 忽略 */ }
+        }
+        // 上櫃（TPEx）：欄位 [日期,成交張數,成交仟元,開,高,低,收,漲跌,筆數]
+        for (const row of (jP?.tables?.[0]?.data || [])) {
+            const date = rocToIso(row[0]);
+            const close = num(row[6]);
+            if (!date || !(close > 0) || out[date]) continue;   // 已有上市資料則不覆寫
+            out[date] = {
+                date, close,
+                high: num(row[4]) > 0 ? num(row[4]) : close,
+                low: num(row[5]) > 0 ? num(row[5]) : close,
+                volume: (num(row[1]) || 0) * 1000,   // 張 → 股，與 Yahoo 單位一致
+            };
+        }
     }));
 
     return out;
@@ -183,7 +176,7 @@ export default async function handler(req, res) {
         if (!history) history = await fetchYahoo(symbol, '.TWO', range);
 
         // 以官方日成交補齊／校正近兩個月（Yahoo 實測會漏日，見 fetchOfficialRecent 註解）
-        const official = await fetchOfficialRecent(symbol, 2);
+        const official = await fetchOfficialRecent(symbol, 1);
         if (Object.keys(official).length > 0) {
             const byDate = {};
             for (const h of (history || [])) byDate[h.date] = h;
