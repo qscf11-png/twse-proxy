@@ -107,17 +107,24 @@ const fetchOfficialRecent = async (symbol, months = 1) => {
 };
 
 /**
- * 交易日曆：以 Yahoo 的加權指數（^TWII）近一個月序列為準。
- * 用途是判斷個股序列是否真的缺日——只有缺日時才去打官方 API。
+ * 交易日曆：判斷個股序列是否真的漏日——只有漏日時才去打官方 API 補齊。
  * 若每檔都無條件補官方，36 檔併發時 TWSE/TPEx 會對同一出口 IP 限流，
  * 實測單檔延遲從 0.8s 飆到 10s 以上。
+ *
+ * 日曆改走自家 /api/calendar（證交所官方資料 + 邊緣快取 1 小時）。
+ * 不可用 Yahoo 的 ^TWII 當日曆——實測 Yahoo 連指數都會漏日
+ * （2026-09-03 在 ^TWII 與 0050 同時缺席），漏日偵測會整個失效。
+ * 日曆取不到時回 null，呼叫端一律補官方（寧可慢，不可錯）。
  */
-const fetchCalendar = async () => {
+const fetchCalendar = async (host) => {
     try {
-        const h = await fetchYahoo('^TWII', '', '1mo');
-        return h ? h.map((x) => x.date) : [];
+        const base = host ? `https://${host}` : 'https://twse-proxy-api.vercel.app';
+        const r = await fetch(`${base}/api/calendar`, { headers: HEADERS });
+        if (!r.ok) return null;
+        const j = await r.json();
+        return Array.isArray(j?.dates) && j.dates.length > 0 ? j.dates : null;
     } catch {
-        return [];
+        return null;
     }
 };
 
@@ -190,17 +197,17 @@ export default async function handler(req, res) {
         // 個股序列與交易日曆同時抓（日曆用於判斷是否缺日，不增加關鍵路徑延遲）
         const [histRaw, calendar] = await Promise.all([
             (async () => (await fetchYahoo(symbol, '.TW', range)) || (await fetchYahoo(symbol, '.TWO', range)))(),
-            fetchCalendar(),
+            fetchCalendar(req.headers.host),
         ]);
         let history = histRaw;
 
         // 僅在近 20 個交易日確實有缺漏時，才以官方日成交補齊
-        // （Yahoo 實測會漏日，如 0050 缺 2026-09-01，見 fetchOfficialRecent 註解）
+        // （Yahoo 實測會漏日，如 0050 缺 2026-09-01、2026-09-03，見 fetchOfficialRecent 註解）
         const have = new Set((history || []).map((h) => h.date));
         const firstDate = history?.[0]?.date;
-        const gaps = calendar
-            .slice(-20)
-            .filter((d) => (!firstDate || d >= firstDate) && !have.has(d));
+        const gaps = calendar === null
+            ? ['calendar-unavailable']    // 日曆掛掉時一律補齊，寧可慢也不要漏日
+            : calendar.slice(-20).filter((d) => (!firstDate || d >= firstDate) && !have.has(d));
 
         if (gaps.length > 0) {
             const official = await fetchOfficialRecent(symbol, 1);
