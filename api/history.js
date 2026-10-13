@@ -107,6 +107,54 @@ const fetchOfficialRecent = async (symbol, months = 1) => {
 };
 
 /**
+ * 興櫃歷史行情（TPEx）——補在上櫃掛牌之前的那一段
+ *
+ * 為何需要：剛從興櫃轉上櫃的個股，Yahoo 只有掛牌後的資料。實測 7856 漢測
+ * 2026-09-08 掛牌，到 10/13 只有 23 筆，低於型態分析要求的 40 筆，
+ * 畫面上一直顯示「資料不足」——但那是手上的持股，等於完全沒有防守價可看。
+ *
+ * 價格口徑：興櫃無收盤集合競價，官方只提供「當日成交均價」，故以均價充當收盤價。
+ * 重疊期實測兩者極接近（2026-09-16 興櫃均價 4815.52 vs 上櫃收盤 4810，差 0.1%），
+ * 接起來不會出現斷層。重疊日一律以上櫃／Yahoo 為準，不覆寫。
+ *
+ * 欄位：[民國日期, 成交股數, 成交金額, 最高, 最低, 均價, 筆數, ...]
+ * @returns {Object} date → { date, close, high, low, volume, src: 'emerging' }
+ */
+const fetchEmergingTPEx = async (symbol, months = 8) => {
+    const out = {};
+    const now = new Date();
+    const jobs = [];
+    for (let i = 0; i < months; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        jobs.push(`${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, '0')}/01`);
+    }
+
+    const results = await Promise.all(jobs.map((q) =>
+        fetch(`https://www.tpex.org.tw/www/zh-tw/emerging/historical?code=${encodeURIComponent(symbol)}&date=${encodeURIComponent(q)}&response=json`,
+            { headers: HEADERS })
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null)
+    ));
+
+    for (const j of results) {
+        for (const row of (j?.tables?.[0]?.data || [])) {
+            const date = rocToIso(row[0]);
+            const close = num(row[5]);        // 均價
+            if (!date || !(close > 0)) continue;
+            const high = num(row[3]), low = num(row[4]);
+            out[date] = {
+                date, close,
+                high: high > 0 ? high : close,
+                low: low > 0 ? low : close,
+                volume: num(row[1]) || 0,
+                src: 'emerging',              // 標記來源，日後若要排除興櫃期間可用
+            };
+        }
+    }
+    return out;
+};
+
+/**
  * 交易日曆：判斷個股序列是否真的漏日——只有漏日時才去打官方 API 補齊。
  * 若每檔都無條件補官方，36 檔併發時 TWSE/TPEx 會對同一出口 IP 限流，
  * 實測單檔延遲從 0.8s 飆到 10s 以上。
@@ -215,6 +263,20 @@ export default async function handler(req, res) {
                 const byDate = {};
                 for (const h of (history || [])) byDate[h.date] = h;
                 for (const [d, v] of Object.entries(official)) byDate[d] = v;   // 官方為準
+                history = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+            }
+        }
+
+        // 序列太短 → 可能是剛從興櫃轉上櫃（或仍在興櫃），往前補興櫃歷史。
+        // 門檻 60 筆：型態分析要 40 筆、防守價歷史要 45 筆，留點餘裕。
+        // 非興櫃股查不到就是空物件，略過即可——只有短歷史的個股才會多打這幾次。
+        const MIN_BARS = 60;
+        if (!history || history.length < MIN_BARS) {
+            const emerging = await fetchEmergingTPEx(symbol, 8);
+            if (Object.keys(emerging).length > 0) {
+                const byDate = { ...emerging };
+                // 上櫃／Yahoo 為準：重疊日覆寫興櫃均價
+                for (const h of (history || [])) byDate[h.date] = h;
                 history = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
             }
         }
